@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "update": "auto",
+  "default_agent": "plan",
+
+  // Preserve V1 outside-project prompt (V2 defaults external_directory to allow)
+  "permissions": [
+    { "action": "external_directory", "resource": "*", "effect": "ask" }
+  ],
+
+  // === Agent Overrides ===
+  "agents": {
+    "build": {
+      "permissions": [
+        { "action": "shell", "resource": "*", "effect": "ask" }
+      ]
+    },
+    "plan": {
+      "permissions": [
+        { "action": "question", "resource": "*", "effect": "allow" }
+      ]
+    }
+  },
+
+  // === Auto Compaction (1M Context Window Models) ===
+  "compaction": {
+    "auto": true,
+    "keep": {
+      "tokens": 40000
+    },
+    "buffer": 600000
+  }
+
+  // === MCP Servers ===
+  // You're strongly adviced to not add active MCP servers in global scope.
+  // If you do, you will be paying the context bload penalty in every session, no matter which project.
+  // You're advised to configure MCP server specficially for each individual project.
+}

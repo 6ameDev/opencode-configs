@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dobby: activate/deactivate skills from master-list repo.
+# Scope: ./.opencode in CWD -> project, else global.
+# Master root resolves from this script location, so it runs from anywhere.
+
+resolve_master_root() {
+  if [[ -n "${OPENCODE_SKILLS_MASTER:-}" && -d "${OPENCODE_SKILLS_MASTER}/skills" ]]; then
+    (cd -P "${OPENCODE_SKILLS_MASTER}" && pwd)
+    return
+  fi
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "$source" ]]; do
+    local dir target
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    target="$(readlink "$source")"
+    [[ "$target" != /* ]] && source="$dir/$target" || source="$target"
+  done
+  local script_dir
+  script_dir="$(cd -P "$(dirname "$source")" && pwd)"
+  if [[ -d "$script_dir/../skills" ]]; then
+    (cd -P "$script_dir/.." && pwd)
+  else
+    (cd -P "$script_dir" && pwd)
+  fi
+}
+
+MASTER_ROOT="$(resolve_master_root)"
+MASTER_SKILLS="$MASTER_ROOT/skills"
+GLOBAL_ROOT="$HOME/.config/opencode"
+GLOBAL_SKILLS="$GLOBAL_ROOT/skills"
+
+die() { echo "error: $*" >&2; exit 1; }
+need_gum() { command -v gum >/dev/null 2>&1 || die "gum is required (brew install gum)"; }
+
+valid_id() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]
+}
+
+# List master skills: <id><TAB><kind><TAB><source-path> (source has no trailing slash)
+list_master_skills() {
+  [[ -d "$MASTER_SKILLS" ]] || die "master skills dir missing: $MASTER_SKILLS"
+  {
+    for skill_dir in "$MASTER_SKILLS"/*/; do
+      [[ -d "$skill_dir" ]] || continue
+      [[ -f "${skill_dir}SKILL.md" ]] || continue
+      printf '%s\tdir\t%s\n' "$(basename "$skill_dir")" "${skill_dir%/}"
+    done
+    for f in "$MASTER_SKILLS"/*.md; do
+      [[ -f "$f" ]] || continue
+      [[ "$(basename "$f")" == "SKILL.md" ]] && continue
+      printf '%s\tfile\t%s\n' "$(basename "$f" .md)" "$f"
+    done
+  } | sort -u
+}
+
+# Lookup one skill: prints <kind><TAB><src>, returns 1 if unknown
+lookup_skill() {
+  list_master_skills | awk -F'\t' -v want="$1" '$1==want {print $2"\t"$3; exit}'
+}
+
+skill_md() {
+  if [[ "$1" == "dir" ]]; then echo "$2/SKILL.md"; else echo "$2"; fi
+}
+
+skill_description_ok() {
+  head -n 20 "$1" 2>/dev/null | grep -Eq '^[[:space:]]*description:'
+}
+
+# True when a symlink text points into this master's skill id
+is_master_link() {
+  [[ "$1" == "$MASTER_SKILLS/$2"* ]]
+}
+
+dest_for() {
+  if [[ "$2" == "file" ]]; then echo "$1/$3.md"; else echo "$1/$3"; fi
+}
+
+# Echoes: missing | symlink-master | symlink-other | copy-active | broken-link | file-master | file-other
+target_status() {
+  local target_dir="$1" id="$2" kind="$3" master_path="$4"
+  local dest raw link
+  dest="$(dest_for "$target_dir" "$kind" "$id")"
+  if [[ -L "$dest" ]]; then
+    [[ -e "$dest" ]] || { echo "broken-link"; return; }
+    raw="$(readlink "$dest")"
+    if is_master_link "$raw" "$id"; then
+      [[ "$kind" == "file" ]] && echo "file-master" || echo "symlink-master"
+      return
+    fi
+    # Same content elsewhere still counts as other: project precedence must be explicit
+    [[ "$kind" == "file" ]] && echo "file-other" || echo "symlink-other"
+    return
+  fi
+  if [[ -e "$dest" ]]; then echo "copy-active"; return; fi
+  echo "missing"
+}
+
+short_label() {
+  case "$1" in
+    missing) echo "inactive" ;;
+    symlink-master|file-master) echo "active(link)" ;;
+    copy-active) echo "active(copy)" ;;
+    symlink-other|file-other) echo "active(other)" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+duplicate_note() {
+  local other_dir="$1" other_label="$2" id="$3" kind="$4" src="$5"
+  [[ -n "$other_dir" && "$other_dir" != "$6" ]] || return 0
+  [[ -d "$other_dir" ]] || return 0
+  [[ "$(target_status "$other_dir" "$id" "$kind" "$src")" != "missing" ]] || return 0
+  if [[ "$other_label" == "global" ]]; then
+    echo "overrides global"
+  else
+    echo "shadowed by project"
+  fi
+}
+
+print_table() {
+  local target_dir="$1" other_dir="$2" other_label="$3"
+  local id kind src st dest warn md dup label
+  printf '%-18s %-14s %s\n' "SKILL" "STATUS" "DETAIL"
+  echo "--------------------------------------------------------------------------------"
+  while IFS=$'\t' read -r id kind src; do
+    [[ -n "$id" ]] || continue
+    st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+    dest="$(dest_for "$target_dir" "$kind" "$id")"
+    warn=""
+    md="$(skill_md "$kind" "$src")"
+    skill_description_ok "$md" || warn="missing description (won't advertise)"
+    if [[ "$st" != "missing" ]]; then
+      dup="$(duplicate_note "$other_dir" "$other_label" "$id" "$kind" "$src" "$target_dir")"
+      if [[ -n "$dup" ]]; then warn="${warn:+$warn; }$dup"; fi
+    fi
+    label="$(short_label "$st")"
+    printf '%-18s %-14s %s\n' "$id" "$label" "$dest"
+    if [[ -n "$warn" ]]; then
+      printf '  ! %s\n' "$warn"
+    fi
+  done < <(list_master_skills)
+}
+
+do_activate() {
+  local target_dir="$1" id="$2"
+  local meta kind src md st
+  valid_id "$id" || { echo "refusing unsafe skill id: $id"; return 1; }
+  meta="$(lookup_skill "$id")" || true
+  [[ -n "$meta" ]] || { echo "unknown skill: $id (not in master)"; return 1; }
+  kind="${meta%%$'\t'*}"
+  src="${meta#*$'\t'}"
+  md="$(skill_md "$kind" "$src")"
+  skill_description_ok "$md" || gum style --foreground 3 "Warning: $id has no description; OpenCode will not advertise it."
+  mkdir -p "$target_dir"
+  st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+  case "$st" in
+    symlink-master|file-master)
+      echo "$id already active (symlink)."; return 0 ;;
+  esac
+  if [[ "$kind" == "file" ]]; then
+    rm -rf "$target_dir/$id.md" || { echo "FAILED: cannot remove $target_dir/$id.md"; return 1; }
+    ln -s "$src" "$target_dir/$id.md" || { echo "FAILED: cannot link $target_dir/$id.md -> $src"; return 1; }
+  else
+    rm -rf "$target_dir/$id" || { echo "FAILED: cannot remove $target_dir/$id"; return 1; }
+    ln -s "$src" "$target_dir/$id" || { echo "FAILED: cannot link $target_dir/$id -> $src"; return 1; }
+  fi
+  [[ "$st" == "missing" ]] && echo "$id activated." || echo "$id activated (replaced $st)."
+}
+
+do_deactivate() {
+  local target_dir="$1" id="$2"
+  local dest parent canonical_target
+  valid_id "$id" || { echo "refusing unsafe skill id: $id"; return 1; }
+  dest="$target_dir/$id"
+  [[ -e "$dest" || -L "$dest" ]] || dest="$target_dir/$id.md"
+  if [[ ! -e "$dest" && ! -L "$dest" ]]; then echo "$id already inactive."; return 0; fi
+  parent="$(cd -P "$(dirname "$dest")" && pwd)"
+  canonical_target="$(cd -P "$target_dir" 2>/dev/null && pwd || echo "$target_dir")"
+  [[ "$parent" == "$canonical_target"* ]] || { echo "refusing to remove outside target dir: $dest"; return 1; }
+  rm -rf "$dest"
+  echo "$id deactivated."
+}
+
+ensure_global_init() {
+  [[ -d "$GLOBAL_ROOT" && -d "$GLOBAL_SKILLS" ]] && return 0
+  gum style --border rounded --padding "0 1" "Global config not found at $GLOBAL_ROOT"
+  if gum confirm --show-output "Initialise global opencode dir and skills folder now?"; then
+    mkdir -p "$GLOBAL_SKILLS" "$GLOBAL_ROOT/themes"
+    gum style --foreground 2 "Initialised $GLOBAL_SKILLS"
+    return 0
+  fi
+  echo "Cancelled: global scope needs $GLOBAL_ROOT."
+  exit 0
+}
+
+usage() {
+  cat <<EOF
+dobby: activate/deactivate master skills (interactive by default)
+
+Usage:
+  dobby                  interactive (scope auto: ./.opencode -> project, else global)
+  dobby list [--global|--project]
+  dobby activate <id> [--global|--project]
+  dobby deactivate <id> [--global|--project]
+  dobby status [--global|--project]
+
+Scope:
+  project = ./.opencode/skills in current directory (must run from project root)
+  global  = ~/.config/opencode/skills
+  Env override: OPENCODE_SKILLS_MASTER=/path/to/opencode-configs
+EOF
+}
+
+main() {
+  need_gum
+  local scope="global" cmd="interactive" arg_id=""
+  [[ -d "./.opencode" ]] && scope="project"
+
+  # single-pass arg parsing: flags anywhere, first bare word is cmd, second is id
+  local args=()
+  for a in "$@"; do
+    case "$a" in
+      --global) scope="global" ;;
+      --project) scope="project" ;;
+      -h|--help) usage; exit 0 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  if [[ "${#args[@]}" -ge 1 ]]; then
+    case "${args[0]}" in
+      list|status|activate|deactivate|interactive|help) cmd="${args[0]}"; ;;
+      *) die "unknown command: ${args[0]} (see --help)" ;;
+    esac
+  fi
+  if [[ "$cmd" == "activate" || "$cmd" == "deactivate" ]]; then
+    arg_id="${args[1]:-}"
+    [[ -n "$arg_id" ]] || die "usage: dobby $cmd <id> [--global|--project]"
+  fi
+
+  local target_dir other_dir="" other_label=""
+  if [[ "$scope" == "project" ]]; then
+    if [[ ! -d "./.opencode" ]]; then
+      gum style --border rounded --padding "0 1" "No ./.opencode here. Switch to global scope or run from project root."
+      if gum confirm --show-output "Use global scope instead?"; then
+        scope="global"
+      else
+        exit 0
+      fi
+    fi
+  fi
+  if [[ "$scope" == "project" ]]; then
+    target_dir="$(pwd)/.opencode/skills"
+    other_dir="$GLOBAL_SKILLS"
+    other_label="global"
+  else
+    target_dir="$GLOBAL_SKILLS"
+    other_label="project"
+    [[ -d "./.opencode" ]] && other_dir="$(pwd)/.opencode/skills"
+  fi
+
+  case "$cmd" in
+    -h|--help|help) usage; exit 0 ;;
+    list|status)
+      if [[ "$scope" == "global" && ! -d "$GLOBAL_ROOT" ]]; then
+        echo "Global dir missing: $GLOBAL_ROOT (nothing active)."
+        echo ""
+      fi
+      gum style --foreground 4 --bold "Master: $MASTER_SKILLS  |  Scope: $scope  |  Target: $target_dir"
+      echo ""
+      print_table "$target_dir" "$other_dir" "$other_label"
+      exit 0
+      ;;
+    activate)
+      [[ "$scope" == "global" ]] && ensure_global_init
+      meta="$(lookup_skill "$arg_id")" || meta=""
+      if [[ -n "$meta" ]]; then
+        dup="$(duplicate_note "$other_dir" "$other_label" "$arg_id" "${meta%%$'\t'*}" "${meta#*$'\t'}" "$target_dir")"
+        [[ -n "$dup" ]] && gum style --foreground 3 "Note: $arg_id $dup."
+      fi
+      do_activate "$target_dir" "$arg_id"
+      exit 0
+      ;;
+    deactivate)
+      if [[ "$scope" == "global" && ! -d "$GLOBAL_ROOT" ]]; then
+        echo "Global dir missing; nothing to deactivate."; exit 0
+      fi
+      gum confirm --show-output "Deactivate $arg_id from $scope scope ($target_dir)?" || { echo "Cancelled."; exit 0; }
+      do_deactivate "$target_dir" "$arg_id"
+      exit 0
+      ;;
+  esac
+
+  # --- interactive ---
+  if [[ "$scope" == "global" && ! -d "$GLOBAL_ROOT" ]]; then
+    ensure_global_init
+    target_dir="$GLOBAL_SKILLS"
+  fi
+
+  local action picked id kind src st
+  gum style --foreground 4 --bold "Skills master: $MASTER_SKILLS"
+  gum style --foreground 4 "Scope: $scope  ->  $target_dir"
+  echo ""
+  print_table "$target_dir" "$other_dir" "$other_label"
+  echo ""
+
+  action="$(gum choose --header "What next?" "Activate skills" "Deactivate skills" "Migrate copies to symlinks" "Quit")" || exit 0
+
+  case "$action" in
+    "Activate skills")
+      candidates=()
+      while IFS=$'\t' read -r id kind src; do
+        [[ -n "$id" ]] || continue
+        st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+        [[ "$st" == "missing" || "$st" == "broken-link" ]] || continue
+        note="$(duplicate_note "$other_dir" "$other_label" "$id" "$kind" "$src" "$target_dir")"
+        if [[ -n "$note" ]]; then
+          candidates+=("$id ($note):$id")
+        else
+          candidates+=("$id:$id")
+        fi
+      done < <(list_master_skills)
+      [[ "${#candidates[@]}" -eq 0 ]] && { gum style --foreground 2 "Everything from master is already active."; exit 0; }
+      picked="$(printf '%s\n' "${candidates[@]}" | gum choose --no-limit --show-help --label-delimiter=":" \
+        --cursor="> " --cursor-prefix="[ ] " --selected-prefix="[x] " --unselected-prefix="[ ] " \
+        --header "Space to tick, Enter to confirm: activate in $scope scope")" || exit 0
+      [[ -n "$picked" ]] || { echo "Nothing selected."; exit 0; }
+      [[ "$scope" == "global" ]] && ensure_global_init
+      mkdir -p "$target_dir"
+      while IFS= read -r line; do
+        id="${line##*:}"
+        id="${id%% *}"
+        [[ -n "$id" ]] || continue
+        do_activate "$target_dir" "$id"
+      done <<< "$picked"
+      ;;
+    "Deactivate skills")
+      candidates=()
+      while IFS=$'\t' read -r id kind src; do
+        [[ -n "$id" ]] || continue
+        st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+        [[ "$st" != "missing" ]] || continue
+        note="$(duplicate_note "$other_dir" "$other_label" "$id" "$kind" "$src" "$target_dir")"
+        if [[ -n "$note" ]]; then
+          candidates+=("$id ($st; $note):$id")
+        else
+          candidates+=("$id ($st):$id")
+        fi
+      done < <(list_master_skills)
+      [[ "${#candidates[@]}" -eq 0 ]] && { gum style --foreground 2 "Nothing active in $scope scope."; exit 0; }
+      picked="$(printf '%s\n' "${candidates[@]}" | gum choose --no-limit --show-help --label-delimiter=":" \
+        --cursor="> " --cursor-prefix="[ ] " --selected-prefix="[x] " --unselected-prefix="[ ] " \
+        --header "Space to tick, Enter to confirm: deactivate from $scope scope")" || exit 0
+      [[ -n "$picked" ]] || { echo "Nothing selected."; exit 0; }
+      gum confirm --show-output "Remove selected skills from $target_dir?" || { echo "Cancelled."; exit 0; }
+      while IFS= read -r line; do
+        id="${line##*:}"
+        id="${id%% *}"
+        [[ -n "$id" ]] || continue
+        do_deactivate "$target_dir" "$id"
+      done <<< "$picked"
+      ;;
+    "Migrate copies to symlinks")
+      candidates=()
+      while IFS=$'\t' read -r id kind src; do
+        [[ -n "$id" ]] || continue
+        st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+        case "$st" in copy-active|symlink-other|file-other) candidates+=("$id ($st)") ;; esac
+      done < <(list_master_skills)
+      [[ "${#candidates[@]}" -eq 0 ]] && { gum style --foreground 2 "No copies to migrate; all active skills are already symlinks to master."; exit 0; }
+      echo "Will migrate these in $scope scope ($target_dir):"
+      printf '  - %s\n' "${candidates[@]}"
+      echo ""
+      echo "Each copy will be removed and replaced with a symlink to master."
+      echo "Master source is never touched."
+      echo ""
+      gum confirm --default --show-output "Replace above copies with symlinks to master?" \
+        || { echo "Cancelled: no changes made."; exit 0; }
+      mkdir -p "$target_dir"
+      migrated=0
+      failed=0
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        id="${line%% *}"
+        [[ -n "$id" ]] || continue
+        echo "--- $id ---"
+        if do_activate "$target_dir" "$id"; then
+          meta="$(lookup_skill "$id")"
+          kind="${meta%%$'\t'*}"
+          src="${meta#*$'\t'}"
+          st="$(target_status "$target_dir" "$id" "$kind" "$src")"
+          if [[ "$st" == "symlink-master" || "$st" == "file-master" ]]; then
+            echo "verified: $id -> $st"
+            ls -ld "$target_dir/$id"* 2>/dev/null || true
+            migrated=$((migrated+1))
+          else
+            echo "FAILED verify: $id status is $st (expected symlink-master)"
+            ls -ld "$target_dir/$id"* 2>/dev/null || true
+            failed=$((failed+1))
+          fi
+        else
+          echo "FAILED: do_activate returned error for $id"
+          failed=$((failed+1))
+        fi
+      done <<< "$(printf '%s\n' "${candidates[@]}")"
+      echo ""
+      echo "Migrated: $migrated, failed: $failed"
+      echo ""
+      echo "Current status:"
+      print_table "$target_dir" "$other_dir" "$other_label"
+      ;;
+    *) echo "Bye." ;;
+  esac
+}
+
+main "$@"
