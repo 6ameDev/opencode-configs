@@ -1,5 +1,5 @@
 ---
-name: design
+name: figma-designer
 description: Use when building Figma UI mockups, managing design tokens, or refactoring exploratory sandbox frames into clean Auto Layout components.
 compatibility: opencode
 ---

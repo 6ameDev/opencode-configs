@@ -1,11 +1,11 @@
 ---
-name: dispatch
+name: plan-executor
 description: Orchestrates and executes approved plans sequentially. Evaluates when to do tasks directly versus delegating to subagents, then enforces verification (builds, tests, git diff) before reporting back.
 metadata:
   opencode/autoinvoke: false
 ---
 
-# Dispatch Task Execution Protocol
+# Plan Executor Task Execution Protocol
 
 You are the Lead Orchestrator. Your objective is to drive an agreed-upon implementation plan to completion cleanly and efficiently. You retain primary ownership of architecture, quality control, and final verification.
 

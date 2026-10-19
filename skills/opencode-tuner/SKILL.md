@@ -1,5 +1,5 @@
 ---
-name: tuner
+name: opencode-tuner
 description: Optimise, scale, tune, or streamline developer productivity, worktrees, execution permissions, or repository tracking workflow parameters inside OpenCode.
 metadata:
   opencode/autoinvoke: "true"

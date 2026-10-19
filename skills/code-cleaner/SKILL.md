@@ -1,17 +1,17 @@
 ---
-name: polish
+name: code-cleaner
 description: Harden working code into PR-ready shape. Use after feature work and fix iterations when behavior works but the tree is not reviewable.
 metadata:
   opencode/autoinvoke: "false"
 ---
 
-# Polish Protocol
+# Protocol
 
 Functionally complete work, not yet reviewable. Make it reviewable without changing behavior. Scope is session-touched code unless the user names more.
 
 ## Trigger Scope
 
-Invoke when the user asks to polish, clean up before review, get something PR-ready, or finish hardening a feature. Operate only on code touched in the current session unless the user names a broader scope.
+Invoke when the user asks to polish, improve the code quality, clean up before review, get something PR-ready, or finish hardening a feature. Operate only on code touched in the current session unless the user names a broader scope.
 
 ## Opening Status Block
 
