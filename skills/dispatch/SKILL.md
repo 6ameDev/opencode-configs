@@ -2,7 +2,6 @@
 name: dispatch
 description: Orchestrates and executes approved plans sequentially. Evaluates when to do tasks directly versus delegating to subagents, then enforces verification (builds, tests, git diff) before reporting back.
 metadata:
-  opencode/slash: "true"
   opencode/autoinvoke: false
 ---
 
