@@ -121,7 +121,7 @@ duplicate_note() {
 
 print_table() {
   local target_dir="$1" other_dir="$2" other_label="$3"
-  local id kind src st dest warn md dup label
+  local id kind src st dest warn md dup label other_st
   printf '%-18s %-14s %s\n' "SKILL" "STATUS" "DETAIL"
   echo "--------------------------------------------------------------------------------"
   while IFS=$'\t' read -r id kind src; do
@@ -131,11 +131,20 @@ print_table() {
     warn=""
     md="$(skill_md "$kind" "$src")"
     skill_description_ok "$md" || warn="missing description (won't advertise)"
-    if [[ "$st" != "missing" ]]; then
-      dup="$(duplicate_note "$other_dir" "$other_label" "$id" "$kind" "$src" "$target_dir")"
-      if [[ -n "$dup" ]]; then warn="${warn:+$warn; }$dup"; fi
+    other_st=""
+    if [[ -n "$other_dir" && "$other_dir" != "$target_dir" && -d "$other_dir" ]]; then
+      other_st="$(target_status "$other_dir" "$id" "$kind" "$src")"
     fi
-    label="$(short_label "$st")"
+    if [[ "$st" == "missing" && -n "$other_st" && "$other_st" != "missing" ]]; then
+      label="active($other_label)"
+      dest="$(dest_for "$other_dir" "$kind" "$id")"
+    else
+      if [[ "$st" != "missing" ]]; then
+        dup="$(duplicate_note "$other_dir" "$other_label" "$id" "$kind" "$src" "$target_dir")"
+        if [[ -n "$dup" ]]; then warn="${warn:+$warn; }$dup"; fi
+      fi
+      label="$(short_label "$st")"
+    fi
     printf '%-18s %-14s %s\n' "$id" "$label" "$dest"
     if [[ -n "$warn" ]]; then
       printf '  ! %s\n' "$warn"
