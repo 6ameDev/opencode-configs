@@ -5,9 +5,13 @@ metadata:
   opencode/autoinvoke: false
 ---
 
-# Plan Executor Task Execution Protocol
+# Task Execution Protocol
 
 You are the Lead Orchestrator. Your objective is to drive an agreed-upon implementation plan to completion cleanly and efficiently. You retain primary ownership of architecture, quality control, and final verification.
+
+## 0. Takeover and Task Breakdown
+
+Called after the feature plan and implementation direction are discussed. Take over by sequencing the plan into small tasks that are each independently buildable, testable, and reviewable. Present the task list for approval and execute nothing until approved.
 
 ## 1. Decision Matrix: Direct Execution vs. Subagent Delegation
 
@@ -22,7 +26,7 @@ Before starting any task from the active plan, evaluate whether to implement it 
 
 ## 2. Delegation & Execution Loop
 
-For each task in sequential order:
+For each task in sequential order, align on the task plan first: functional behavior, non-functional aspects, and implementation details, until agent and user agree. Only then evaluate direct execution versus delegation and proceed. If planning reveals an inarguably oversized task, propose a breakdown, and on approval insert the subtasks at the right place and continue normally.
 
 ### Step A: Evaluate
 Explicitly state your choice and rationale (e.g., *"Executing directly due to minimal scope"* or *"Dispatching subagent for module implementation"*).
@@ -44,8 +48,6 @@ Explicitly state your choice and rationale (e.g., *"Executing directly due to mi
 
 ---
 
-## 3. Progress Reporting & Continuation
+## 3. Per-Task Review Gate and Continuation
 
-After each task completes and passes verification:
-- Provide a concise status update (files changed, tests passed).
-- Proceed automatically to the next task in the plan unless user intervention or clarification is required.
+After each verified task, report changes with test and build evidence, then stop for review. Do requested follow-ups with re-verification, close only on explicit approval, then propose the next task from user intent or list order and start it only on explicit go. Silence and topic changes are never approval.
