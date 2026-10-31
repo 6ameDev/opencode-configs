@@ -7,11 +7,11 @@ Centralised repository for version-controlling custom OpenCode V2 environments, 
 - `skills/` : Modular AI capabilities (auto-invokable or project-specific).
 - `themes/` : Eye-strain optimised UI palettes (e.g., kaapi).
 - `cli.json` : TUI interface layout, theme settings, and formatting rules.
-- `opencode.jsonc` : Global model endpoints, custom variants, and token compaction budgets.
-- `bin/` : Helper tools (dobby, the skill toggle).
+- `opencode/` : Versioned opencode.jsonc variants (`global.jsonc`, `project.jsonc`), linked by dobby.
+- `bin/` : Helper tools (dobby, the skill and config toggle).
 - `AGENTS.md` : Global readability directives and core cognitive styling rules.
 
-## dobby (Skill Toggle Tool)
+## dobby (Skill + Config Toggle Tool)
 
 Interactive manager for this master list. Run from anywhere.
 
@@ -27,8 +27,8 @@ ln -sf <this-repo>/bin/dobby ~/.local/bin/dobby
 Scope is detected from the current directory: a project root containing .opencode means project scope, anywhere else means global scope. Global mode prompts to initialise ~/.config/opencode if it is missing.
 
 ```bash
-# interactive menu (lists skills with status, then activate, deactivate,
-# or migrate copies to symlinks)
+# interactive menu (lists skills and configs with status, then activate/link,
+# deactivate/unlink, or migrate copies to symlinks)
 dobby
 
 # Space ticks a checkbox, Enter confirms
@@ -36,9 +36,19 @@ dobby list
 dobby list --project
 dobby activate opencode-tuner --project
 dobby deactivate opencode-tuner --global
+
+# configs are symlink-only, .jsonc everywhere
+dobby config list
+dobby config status
+dobby config use global --global
+dobby config use project --project
+dobby config diff global --global
+dobby config unlink --global
 ```
 
 Project skills override global ones on ID collision. The list and the pickers flag this: expect overrides global in project scope and shadowed by project in global scope.
+
+Configs merge instead of override: project opencode.jsonc is merged over global opencode.jsonc. `dobby config status` shows both levels in precedence order and which master variant each links to.
 
 ## Self-Evolution & Syncing Workflow
 

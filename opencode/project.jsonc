@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json"
+
+  // === Project Overrides (merged over global) ===
+  // Keep project config small and specific to this repo.
+  // Global holds agents, permissions, and compaction budgets.
+  // Uncomment and edit as needed:
+
+  // "permissions": [
+  //   { "action": "external_directory", "resource": "*", "effect": "ask" }
+  // ]
+
+  // === MCP Servers ===
+  // Prefer project-scoped MCP servers here over global scope,
+  // so you only pay the context bloat penalty where they are used.
+  // "mcp": {}
+}

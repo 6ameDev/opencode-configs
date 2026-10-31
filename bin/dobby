@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# dobby: activate/deactivate skills from master-list repo.
+# dobby: activate/deactivate skills and link/unlink opencode.jsonc configs from master-list repo.
 # Scope: ./.opencode in CWD -> project, else global.
 # Master root resolves from this script location, so it runs from anywhere.
 
@@ -19,7 +19,7 @@ resolve_master_root() {
   done
   local script_dir
   script_dir="$(cd -P "$(dirname "$source")" && pwd)"
-  if [[ -d "$script_dir/../skills" ]]; then
+  if [[ -d "$script_dir/../skills" || -d "$script_dir/../opencode" ]]; then
     (cd -P "$script_dir/.." && pwd)
   else
     (cd -P "$script_dir" && pwd)
@@ -28,8 +28,10 @@ resolve_master_root() {
 
 MASTER_ROOT="$(resolve_master_root)"
 MASTER_SKILLS="$MASTER_ROOT/skills"
+MASTER_CONFIGS="$MASTER_ROOT/opencode"
 GLOBAL_ROOT="$HOME/.config/opencode"
 GLOBAL_SKILLS="$GLOBAL_ROOT/skills"
+GLOBAL_CONFIG="$GLOBAL_ROOT/opencode.jsonc"
 
 die() { echo "error: $*" >&2; exit 1; }
 need_gum() { command -v gum >/dev/null 2>&1 || die "gum is required (brew install gum)"; }
@@ -192,6 +194,209 @@ do_deactivate() {
   echo "$id deactivated."
 }
 
+# --- opencode.jsonc configs (symlink-only, .jsonc everywhere) ---
+
+# List master configs: <variant><TAB><source-path>
+list_master_configs() {
+  [[ -d "$MASTER_CONFIGS" ]] || die "master configs dir missing: $MASTER_CONFIGS"
+  local f
+  for f in "$MASTER_CONFIGS"/*.jsonc; do
+    [[ -f "$f" ]] || continue
+    printf '%s\t%s\n' "$(basename "$f" .jsonc)" "$f"
+  done | sort -u
+}
+
+# Lookup one variant: prints <source-path>, returns 1 if unknown
+lookup_config() {
+  list_master_configs | awk -F'\t' -v want="$1" '$1==want {print $2; exit}'
+}
+
+# Lightweight JSONC syntax check: strip // and /* */ comments, then json.loads.
+# Skips when python3 is unavailable. Returns 0 on ok, 1 on syntax error.
+validate_config_file() {
+  local file="$1"
+  [[ -f "$file" ]] || { echo "config file missing: $file"; return 1; }
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$file" <<'PY'
+import json, re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+text = re.sub(r'(?m)^\s*//.*$', '', text)
+text = re.sub(r'(?m)(?<=[\s{,])//.*$', '', text)
+try:
+    json.loads(text)
+except Exception as e:
+    print(f"invalid JSONC in {path}: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# Echoes: missing | broken-link | symlink-master:<variant> | symlink-other | file-active
+config_status_for() {
+  local target="$1"
+  local raw base
+  if [[ -L "$target" ]]; then
+    [[ -e "$target" ]] || { echo "broken-link"; return; }
+    raw="$(readlink "$target")"
+    if [[ "$raw" == "$MASTER_CONFIGS/"* ]]; then
+      base="$(basename "$raw" .jsonc)"
+      echo "symlink-master:$base"
+      return
+    fi
+    echo "symlink-other"
+    return
+  fi
+  if [[ -d "$target" ]]; then echo "file-active"; return; fi
+  if [[ -e "$target" ]]; then echo "file-active"; return; fi
+  echo "missing"
+}
+
+config_short_label() {
+  case "$1" in
+    missing) echo "inactive" ;;
+    symlink-master:*) echo "active(link:${1#symlink-master:})" ;;
+    symlink-other) echo "active(link:other)" ;;
+    file-active) echo "active(file)" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+config_target_for_scope() {
+  if [[ "$1" == "project" ]]; then
+    echo "$(pwd)/.opencode/opencode.jsonc"
+  else
+    echo "$GLOBAL_CONFIG"
+  fi
+}
+
+# Hierarchy view: global target + project target (when in a project), lowest to highest precedence.
+print_config_hierarchy() {
+  local global_target="$GLOBAL_CONFIG" project_target="" gs ps
+  [[ -d "./.opencode" ]] && project_target="$(pwd)/.opencode/opencode.jsonc"
+  gs="$(config_status_for "$global_target")"
+  printf '%-10s %-22s %s\n' "LEVEL" "STATUS" "TARGET"
+  echo "--------------------------------------------------------------------------------"
+  printf '%-10s %-22s %s\n' "global" "$(config_short_label "$gs")" "$global_target"
+  if [[ "$gs" == "symlink-master:"* ]]; then
+    printf '  -> master variant: %s\n' "${gs#symlink-master:}"
+  elif [[ "$gs" == "symlink-other" ]]; then
+    printf '  -> points at: %s\n' "$(readlink "$global_target")"
+  elif [[ "$gs" == "file-active" ]]; then
+    printf '  ! custom file (not linked to master; use diff to compare)\n'
+  fi
+  if [[ -n "$project_target" ]]; then
+    ps="$(config_status_for "$project_target")"
+    printf '%-10s %-22s %s\n' "project" "$(config_short_label "$ps")" "$project_target"
+    if [[ "$ps" == "symlink-master:"* ]]; then
+      printf '  -> master variant: %s\n' "${ps#symlink-master:}"
+    elif [[ "$ps" == "symlink-other" ]]; then
+      printf '  -> points at: %s\n' "$(readlink "$project_target")"
+    elif [[ "$ps" == "file-active" ]]; then
+      printf '  ! custom file (not linked to master; use diff to compare)\n'
+    fi
+    echo "Precedence: project merged over global."
+  else
+    echo "Project: (not in a project dir; global only)"
+  fi
+}
+
+print_config_table() {
+  local scope_target="$1"
+  local variant src st label
+  printf '%-14s %-22s %s\n' "VARIANT" "STATUS($2)" "SOURCE"
+  echo "--------------------------------------------------------------------------------"
+  while IFS=$'\t' read -r variant src; do
+    [[ -n "$variant" ]] || continue
+    st="$(config_status_for "$scope_target")"
+    if [[ "$st" == "symlink-master:$variant" ]]; then
+      label="active(link)"
+    elif [[ "$st" == "symlink-master:"* ]]; then
+      label="inactive (linked: ${st#symlink-master:})"
+    elif [[ "$st" == "missing" ]]; then
+      label="inactive"
+    else
+      label="$(config_short_label "$st")"
+    fi
+    printf '%-14s %-22s %s\n' "$variant" "$label" "$src"
+  done < <(list_master_configs)
+}
+
+do_config_use() {
+  local variant="$1" scope="$2" target="$3"
+  local src st backup
+  valid_id "$variant" || { echo "refusing unsafe config variant: $variant"; return 1; }
+  src="$(lookup_config "$variant")" || src=""
+  [[ -n "$src" ]] || { echo "unknown config variant: $variant (not in master)"; return 1; }
+  validate_config_file "$src" || return 1
+  if [[ -d "$target" && ! -L "$target" ]]; then
+    echo "refusing: target is a directory: $target"
+    return 1
+  fi
+  mkdir -p "$(dirname "$target")"
+  st="$(config_status_for "$target")"
+  if [[ "$st" == "symlink-master:$variant" ]]; then
+    echo "$variant already active in $scope scope."
+    return 0
+  fi
+  if [[ "$st" == "file-active" ]]; then
+    backup="$target.backup.$(date +%Y%m%d-%H%M%S)"
+    cp "$target" "$backup" || { echo "FAILED: cannot backup $target"; return 1; }
+    echo "Backed up custom file to $backup"
+  fi
+  rm -f "$target" || { echo "FAILED: cannot remove $target"; return 1; }
+  ln -s "$src" "$target" || { echo "FAILED: cannot link $target -> $src"; return 1; }
+  [[ "$st" == "missing" || "$st" == "broken-link" ]] && echo "$variant linked in $scope scope." || echo "$variant linked in $scope scope (replaced $st)."
+}
+
+do_config_unlink() {
+  local scope="$1" target="$2"
+  local st parent canonical_parent
+  st="$(config_status_for "$target")"
+  if [[ "$st" == "missing" ]]; then echo "already inactive in $scope scope."; return 0; fi
+  if [[ -d "$target" && ! -L "$target" ]]; then
+    echo "refusing: target is a directory: $target"
+    return 1
+  fi
+  parent="$(cd -P "$(dirname "$target")" 2>/dev/null && pwd || echo "$(dirname "$target")")"
+  if [[ "$scope" == "global" ]]; then
+    canonical_parent="$(cd -P "$GLOBAL_ROOT" 2>/dev/null && pwd || echo "$GLOBAL_ROOT")"
+  else
+    canonical_parent="$(cd -P "$(pwd)/.opencode" 2>/dev/null && pwd || echo "$(pwd)/.opencode")"
+  fi
+  [[ "$parent" == "$canonical_parent"* ]] || { echo "refusing to remove outside scope dir: $target"; return 1; }
+  rm -f "$target"
+  echo "config unlinked from $scope scope."
+}
+
+do_config_diff() {
+  local variant="$1" target="$2"
+  local src st
+  if [[ -n "$variant" ]]; then
+    src="$(lookup_config "$variant")" || src=""
+    [[ -n "$src" ]] || { echo "unknown config variant: $variant"; return 1; }
+  else
+    st="$(config_status_for "$target")"
+    if [[ "$st" == "symlink-master:"* ]]; then
+      echo "target already links master variant ${st#symlink-master:} (no diff)."
+      return 0
+    fi
+    echo "--- target: $target ---"
+    if [[ -e "$target" || -L "$target" ]]; then
+      cat "$target"
+    else
+      echo "(missing)"
+    fi
+    return 0
+  fi
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
+    echo "--- target missing: $target; showing master $variant ---"
+    cat "$src"
+    return 0
+  fi
+  diff -u "$target" "$src" || true
+}
+
 ensure_global_init() {
   [[ -d "$GLOBAL_ROOT" && -d "$GLOBAL_SKILLS" ]] && return 0
   gum style --border rounded --padding "0 1" "Global config not found at $GLOBAL_ROOT"
@@ -206,7 +411,7 @@ ensure_global_init() {
 
 usage() {
   cat <<EOF
-dobby: activate/deactivate master skills (interactive by default)
+dobby: activate/deactivate master skills, link/unlink master opencode.jsonc (interactive by default)
 
 Usage:
   dobby                  interactive (scope auto: ./.opencode -> project, else global)
@@ -214,20 +419,25 @@ Usage:
   dobby activate <id> [--global|--project]
   dobby deactivate <id> [--global|--project]
   dobby status [--global|--project]
+  dobby config list [--global|--project]
+  dobby config status
+  dobby config use <variant> [--global|--project]
+  dobby config unlink [--global|--project]
+  dobby config diff [<variant>] [--global|--project]
 
 Scope:
-  project = ./.opencode/skills in current directory (must run from project root)
-  global  = ~/.config/opencode/skills
+  project = ./.opencode/skills and ./.opencode/opencode.jsonc in current directory (must run from project root)
+  global  = ~/.config/opencode/skills and ~/.config/opencode/opencode.jsonc
   Env override: OPENCODE_SKILLS_MASTER=/path/to/opencode-configs
 EOF
 }
 
 main() {
   need_gum
-  local scope="global" cmd="interactive" arg_id=""
+  local scope="global" cmd="interactive" arg_id="" cfg_sub="" cfg_variant=""
   [[ -d "./.opencode" ]] && scope="project"
 
-  # single-pass arg parsing: flags anywhere, first bare word is cmd, second is id
+  # single-pass arg parsing: flags anywhere, first bare word is cmd, rest depend on cmd
   local args=()
   for a in "$@"; do
     case "$a" in
@@ -239,13 +449,26 @@ main() {
   done
   if [[ "${#args[@]}" -ge 1 ]]; then
     case "${args[0]}" in
-      list|status|activate|deactivate|interactive|help) cmd="${args[0]}"; ;;
+      list|status|activate|deactivate|interactive|help|config) cmd="${args[0]}"; ;;
       *) die "unknown command: ${args[0]} (see --help)" ;;
     esac
   fi
   if [[ "$cmd" == "activate" || "$cmd" == "deactivate" ]]; then
     arg_id="${args[1]:-}"
     [[ -n "$arg_id" ]] || die "usage: dobby $cmd <id> [--global|--project]"
+  fi
+  if [[ "$cmd" == "config" ]]; then
+    cfg_sub="${args[1]:-status}"
+    case "$cfg_sub" in
+      list|status|use|unlink|diff) ;;
+      *) die "unknown config subcommand: $cfg_sub (use: list, status, use, unlink, diff)" ;;
+    esac
+    if [[ "$cfg_sub" == "use" ]]; then
+      cfg_variant="${args[2]:-}"
+      [[ -n "$cfg_variant" ]] || die "usage: dobby config use <variant> [--global|--project]"
+    elif [[ "$cfg_sub" == "diff" ]]; then
+      cfg_variant="${args[2]:-}"
+    fi
   fi
 
   local target_dir other_dir="" other_label=""
@@ -299,6 +522,44 @@ main() {
       do_deactivate "$target_dir" "$arg_id"
       exit 0
       ;;
+    config)
+      case "$cfg_sub" in
+        list)
+          gum style --foreground 4 --bold "Configs master: $MASTER_CONFIGS  |  Scope: $scope"
+          echo ""
+          print_config_table "$(config_target_for_scope "$scope")" "$scope"
+          exit 0
+          ;;
+        status)
+          gum style --foreground 4 --bold "Configs master: $MASTER_CONFIGS"
+          echo ""
+          print_config_hierarchy
+          exit 0
+          ;;
+        use)
+          if [[ "$scope" == "project" && ! -d "./.opencode" ]]; then
+            die "project scope needs ./.opencode (run from project root)"
+          fi
+          # NB: no ensure_global_init here on purpose: explicit `config use --global`
+          # is clear intent, and do_config_use mkdirs the parent. The gum confirm
+          # prompt would also block non-interactive use (no TTY).
+          do_config_use "$cfg_variant" "$scope" "$(config_target_for_scope "$scope")" || exit 1
+          exit 0
+          ;;
+        unlink)
+          if [[ "$scope" == "project" && ! -d "./.opencode" ]]; then
+            die "project scope needs ./.opencode (run from project root)"
+          fi
+          gum confirm --show-output "Unlink opencode.jsonc from $scope scope ($(config_target_for_scope "$scope"))?" || { echo "Cancelled."; exit 0; }
+          do_config_unlink "$scope" "$(config_target_for_scope "$scope")"
+          exit 0
+          ;;
+        diff)
+          do_config_diff "$cfg_variant" "$(config_target_for_scope "$scope")"
+          exit 0
+          ;;
+      esac
+      ;;
   esac
 
   # --- interactive ---
@@ -308,13 +569,15 @@ main() {
   fi
 
   local action picked id kind src st
-  gum style --foreground 4 --bold "Skills master: $MASTER_SKILLS"
+  gum style --foreground 4 --bold "Skills master: $MASTER_SKILLS  |  Configs master: $MASTER_CONFIGS"
   gum style --foreground 4 "Scope: $scope  ->  $target_dir"
   echo ""
   print_table "$target_dir" "$other_dir" "$other_label"
   echo ""
+  print_config_hierarchy
+  echo ""
 
-  action="$(gum choose --header "What next?" "Activate skills" "Deactivate skills" "Migrate copies to symlinks" "Quit")" || exit 0
+  action="$(gum choose --header "What next?" "Activate skills" "Deactivate skills" "Migrate copies to symlinks" "Manage configs" "Quit")" || exit 0
 
   case "$action" in
     "Activate skills")
@@ -418,6 +681,46 @@ main() {
       echo ""
       echo "Current status:"
       print_table "$target_dir" "$other_dir" "$other_label"
+      ;;
+    "Manage configs")
+      local cfg_action cfg_scope cfg_target cfg_variant cfg_src
+      cfg_action="$(gum choose --header "Configs: what next?" "Link config" "Unlink config" "Diff config" "Back")" || exit 0
+      case "$cfg_action" in
+        "Link config")
+          cfg_scope="$scope"
+          if ! gum confirm --show-output "Link config in $cfg_scope scope? (confirm scope)"; then
+            if [[ "$cfg_scope" == "global" ]]; then cfg_scope="project"; else cfg_scope="global"; fi
+            gum style --foreground 3 "Switched to $cfg_scope scope."
+          fi
+          if [[ "$cfg_scope" == "project" && ! -d "./.opencode" ]]; then
+            echo "Project scope needs ./.opencode here."; exit 0
+          fi
+          cfg_target="$(config_target_for_scope "$cfg_scope")"
+          if [[ "$cfg_scope" == "global" ]]; then ensure_global_init; fi
+          picked="$(list_master_configs | cut -f1 | gum choose --header "Pick master variant to link in $cfg_scope scope")" || exit 0
+          [[ -n "$picked" ]] || { echo "Nothing selected."; exit 0; }
+          cfg_variant="$picked"
+          cfg_src="$(lookup_config "$cfg_variant")"
+          echo "--- diff: $cfg_target vs master $cfg_variant ---"
+          if [[ -e "$cfg_target" || -L "$cfg_target" ]]; then diff -u "$cfg_target" "$cfg_src" || true; else echo "(target missing; will create link)"; fi
+          echo ""
+          gum confirm --show-output "Link $cfg_variant -> $cfg_target?" || { echo "Cancelled."; exit 0; }
+          do_config_use "$cfg_variant" "$cfg_scope" "$cfg_target"
+          ;;
+        "Unlink config")
+          cfg_scope="$scope"
+          cfg_target="$(config_target_for_scope "$cfg_scope")"
+          gum confirm --show-output "Unlink opencode.jsonc from $cfg_scope scope ($cfg_target)?" || { echo "Cancelled."; exit 0; }
+          do_config_unlink "$cfg_scope" "$cfg_target"
+          ;;
+        "Diff config")
+          cfg_target="$(config_target_for_scope "$scope")"
+          picked="$(list_master_configs | cut -f1 | gum choose --header "Pick master variant to diff against $scope target")" || exit 0
+          [[ -n "$picked" ]] || { echo "Nothing selected."; exit 0; }
+          do_config_diff "$picked" "$cfg_target"
+          ;;
+        *) echo "Bye." ;;
+      esac
       ;;
     *) echo "Bye." ;;
   esac

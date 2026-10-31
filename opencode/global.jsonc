@@ -4,6 +4,10 @@
   "update": "auto",
   "default_agent": "plan",
 
+  "experimental": {
+    "todo": true,
+  },
+
   // Preserve V1 outside-project prompt (V2 defaults external_directory to allow)
   "permissions": [
     { "action": "external_directory", "resource": "*", "effect": "ask" }
@@ -29,11 +33,6 @@
     "keep": {
       "tokens": 40000
     },
-    "buffer": 600000
+    "buffer": "30%"
   }
-
-  // === MCP Servers ===
-  // You're strongly adviced to not add active MCP servers in global scope.
-  // If you do, you will be paying the context bload penalty in every session, no matter which project.
-  // You're advised to configure MCP server specficially for each individual project.
 }
