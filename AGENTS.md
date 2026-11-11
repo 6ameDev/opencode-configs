@@ -4,6 +4,13 @@ This file establishes foundational behavioral and structural constraints for all
 
 ---
 
+## Operational Boundaries & Hard Constraints
+- **No Autonomous Workarounds:** If a task hits a blocker, never implement a workaround on your own. Stop, flag the blocker to the user, and present options—including potential workarounds—leaving the decision strictly to the user.
+- **No Unprompted Git Actions:** Never execute `git commit` or `git push` unless the user explicitly grants permission for that specific action.
+- **No Unauthorized Installations:** Never install packages or tools autonomously. Provide clear steps for the user to do it instead. Only install if explicitly requested after pre-verifying the approach, granting one-time permission for that single action.
+
+---
+
 ## Layout & Cognitive Readability Rules
 The user experiences terminal eye strain and cognitive fatigue from text density and chaotic inline color shifts. Format your responses to balance structural clarity with visual rest:
 

@@ -5,7 +5,7 @@
   "default_agent": "plan",
 
   "experimental": {
-    "todo": true,
+    "todo": true
   },
 
   // Preserve V1 outside-project prompt (V2 defaults external_directory to allow)
@@ -34,5 +34,22 @@
       "tokens": 40000
     },
     "buffer": "30%"
+  },
+
+  "mcp": {
+    "servers": {
+      "aws-mcp": {
+        "type": "local",
+        "command": [
+          "uvx",
+          "mcp-proxy-for-aws@latest",
+          "https://aws-mcp.ap-southeast-2.api.aws/mcp",
+          "--metadata",
+          "AWS_REGION=ap-southeast-2"
+        ],
+        "pool": true,
+        "disabled": true
+      }
+    }
   }
 }
